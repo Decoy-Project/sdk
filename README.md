@@ -569,7 +569,8 @@ the account and the `key` string for the holder.
 |---|---|---|---|
 | `holder` | `string` | Yes | Not empty after the client removes surrounding spaces. |
 
-The memory backend returns an invented key string that carries no key material.
+The memory backend records the grant and returns an empty `key`, because it holds no key to hand over. A real view key
+comes from `epochKeys` and `encodeViewKey`.
 
 Error code: `emptyHolder`.
 

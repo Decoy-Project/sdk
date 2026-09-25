@@ -1,7 +1,7 @@
 {
   "name": "@decoy/sdk",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "description": "DECOY SDK: domain types, protocol parameters, rules, and a client that runs on a backend.",
   "exports": {
