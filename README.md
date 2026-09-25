@@ -4,12 +4,22 @@
 check a request, and the client. The DECOY desktop app and the DECOY CLI read and change the account only through
 this package.
 
-## Status on 15 Sep 2026
+## Status on 26 Sep 2026
 
-- `memoryBackend` is the only backend. It keeps the account in memory and starts from the state that you pass in.
-- No backend reads Robinhood Chain yet, because the DECOY contracts and circuits do not exist.
+- The SDK reads Robinhood Chain. `openChain` gives a read-only view of the chain: the height, a native balance, a
+  token balance and token metadata. See [Read the chain](#read-the-chain).
+- The DECOY pool exists on the testnet, and as a test pool on mainnet with caps of 0.05 WETH a note and 0.2 WETH in
+  all. Its addresses are in `src/network/generated/deployments.ts`, which `apps/protocol` generates.
+- The shield layer works against that pool:
+  - deposits (`shieldNotes`) and receiving, from fresh addresses and ERC-5564 stealth payments (`createReceiver`);
+  - withdrawals through a relayer (`withdrawPayments`, `createRelayerClient`), and claims from a frozen pool
+    (`claimNote`);
+  - churn and epoch revoke (`createChurner`), and restore from the recovery phrase (`restoreAccount`).
+  - Proofs are made on the device with bb.js (`@decoy/sdk/prove`).
+- `createDecoy` still runs on `memoryBackend` for the account features that have no chain implementation yet.
 - The protocol parameters are ESTIMATE values from DECOY's design research, dated 12 Sep 2026.
-- The package is not published to npm.
+- The SDK depends on `@decoy/protocol`, which is not published. It builds inside the DECOY workspace, next to that
+  package. The SDK itself is not published to npm either.
 
 ## Install
 
@@ -47,6 +57,86 @@ const decoy = createDecoy({
 
 The example uses invented numbers. For a complete `Account` to start from, see `fixtureAccount` in
 `src/client/createDecoy.test.ts`.
+
+## Read the chain
+
+`openChain` opens a read-only view of one network:
+
+```ts
+import { openChain } from "@decoy/sdk";
+
+const chain = openChain({ endpoints: { alchemyApiKey: process.env.DECOY_ALCHEMY_KEY } });
+
+const height = await chain.blockNumber();
+const assets = await chain.readAssets();
+```
+
+The client tries the endpoints in this order, and uses the first one that answers for the expected chain:
+
+| Order | Endpoint | Source |
+|---|---|---|
+| 1 | `user` | `endpoints.userRpcUrl`, the node that the user set |
+| 2 | `alchemy` | `endpoints.alchemyApiKey`, with the URL built from `alchemyHost` in the network config |
+| 3 | `public` | `publicRpcUrl` in the network config |
+
+The SDK takes an Alchemy API key, never an Alchemy URL. It builds the URL from the network's host, so a key cannot
+send a request to a host that the config does not name.
+
+An API key never comes from this package. The caller reads it from its own configuration and passes the key.
+
+Each endpoint carries two URLs. The `url` field holds the key and goes to the network. The `displayUrl` field masks the
+key, and every message a user can see uses it: the endpoint reports, the problem texts and the errors. A key that holds
+a character other than a letter, a digit, a hyphen or an underscore throws `invalidApiKey`, because such a key would
+change the URL it is put in.
+
+The chain values, the token addresses and the public endpoint have one definition site: `src/network/networks.ts`.
+
+`ChainReader` has these methods:
+
+| Method | Result |
+|---|---|
+| `chainId` | The chain id that the endpoint reports. |
+| `blockNumber` | The height of the last block. |
+| `nativeBalance` | The balance of the gas token, in base units. |
+| `tokenBalance` | The balance of one ERC-20 token, in base units. |
+| `tokenMetadata` | The symbol, the name and the decimals of one token. |
+| `readAssets` | Each configured token, read from its contract. |
+| `endpoints` | The state of each endpoint, and the problem that stopped it. |
+| `servedBy` | The endpoint that answered the last read. |
+
+A read that cannot give a correct answer throws a `ChainError`. `readAssets` throws `assetMismatch` when a contract
+reports a different symbol or a different number of decimals than the network config. An endpoint that answers for
+another chain gets the state `refused`, and the client does not use it again.
+
+To follow the height, create a `ChainSync` and pass it to `createDecoy`:
+
+```ts
+import { createChainSync, createDecoy, memoryBackend, openChain } from "@decoy/sdk";
+
+const chain = openChain();
+const chainSync = createChainSync(chain, { pollMs: 1000 });
+const decoy = createDecoy({ backend: memoryBackend(state), chainSync });
+
+chainSync.start();
+```
+
+`account().sync` then carries the height and the id of the endpoint that served it. Without a `chainSync`, the sync
+state is `offline` at block 0, because the client never invents a block number.
+
+### Endpoints that change while the client runs
+
+`endpoints` also takes a function. The client reads it again before every request, so a user who adds an API key or
+points the app at another node does not restart it:
+
+```ts
+const settings = { alchemyApiKey: null as string | null };
+const chain = openChain({ endpoints: () => ({ alchemyApiKey: settings.alchemyApiKey ?? undefined }) });
+
+settings.alchemyApiKey = keyFromTheCredentialStore; // the next request goes to Alchemy
+```
+
+An endpoint whose URL changed starts again as `untried`, and the client verifies its chain id again, because a new URL
+is a new party.
 
 ## Reads, listeners and writes
 
@@ -236,6 +326,18 @@ try {
 | `viewKeyAlreadyRevoked` | `viewKeys.revoke` | The view key has the status `revoked`. |
 | `invalidRpcUrl` | `updateSettings` | `rpcUrl` is not an `http`, `https`, `ws` or `wss` URL. |
 | `invalidAutoLock` | `updateSettings` | `autoLockMinutes` is not a whole number more than zero. |
+
+A chain read that cannot give a correct answer throws a `ChainError`. Its `code` field names the condition:
+
+| Code | Condition |
+|---|---|
+| `wrongChain` | An endpoint answered for a different chain than the network config expects. |
+| `noEndpointAnswered` | Every endpoint failed. The message lists what each one did. |
+| `rpcError` | An endpoint returned a JSON-RPC error. |
+| `badResponse` | A result did not have the shape that the method promises. |
+| `assetMismatch` | A token contract disagrees with the network config. |
+| `invalidEndpointUrl` | An endpoint URL is not an `http`, `https`, `ws` or `wss` URL. |
+| `invalidApiKey` | An API key holds a character that a URL path segment cannot carry. |
 
 ## Rules for input checks
 

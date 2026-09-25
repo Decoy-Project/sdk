@@ -5,7 +5,9 @@
   "type": "module",
   "description": "DECOY SDK: domain types, protocol parameters, rules, and a client that runs on a backend.",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./prove": "./src/prove/index.ts",
+    "./assets/*": "./assets/*"
   },
   "engines": {
     "node": ">=22"
@@ -15,6 +17,15 @@
     "lint": "eslint .",
     "test": "tsx --test \"src/**/*.test.ts\"",
     "check": "npm run typecheck && npm run lint && npm run test"
+  },
+  "dependencies": {
+    "@aztec/bb.js": "5.0.0-nightly.20260522",
+    "@decoy/protocol": "0.1.0",
+    "@noble/curves": "2.4.0",
+    "@noble/hashes": "2.4.0",
+    "@noir-lang/noir_js": "1.0.0-beta.22",
+    "@scure/bip32": "2.4.0",
+    "@scure/bip39": "2.4.0"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",

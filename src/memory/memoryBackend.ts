@@ -1,7 +1,6 @@
 import type { AccountListener, Backend, SettingsPatch, SharedViewKey, Unsubscribe } from "../client/types";
 import type { Account, AccountSettings, ActivityEntry, Address, Asset, Holding, ViewKeyGrant } from "../domain/types";
 import { accountReducer, type AccountAction } from "../state/accountReducer";
-import { mockViewKey } from "./mockViewKey";
 
 /** What a memory backend starts from. None of it is read from a chain. */
 export interface MemoryBackendState {
@@ -75,7 +74,9 @@ export function memoryBackend(state: MemoryBackendState): Backend {
   async function issueViewKey(holder: string): Promise<SharedViewKey> {
     const id = crypto.randomUUID();
     const next = commit({ type: "issueViewKey", holder, at: new Date(), id });
-    return { grant: grantById(next, id), key: mockViewKey(id) };
+    /* A view key is derived from the account's key ladder, and no key ladder exists yet. The grant is recorded so the
+       account is honest about what was issued; the key string is empty because there is nothing to hand over. */
+    return { grant: grantById(next, id), key: "" };
   }
 
   async function revokeViewKey(id: string): Promise<ViewKeyGrant> {

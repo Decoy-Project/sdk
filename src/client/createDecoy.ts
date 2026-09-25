@@ -7,9 +7,11 @@ import type {
   BurnerWallet,
   FundingWallet,
   Holding,
+  SyncState,
   ViewKeyGrant,
 } from "../domain/types";
-import { K_EFF_UNLINKABLE_MIN, MAX_LADDER_TERMS_PER_LEG } from "../protocol/parameters";
+import type { ChainSync } from "../chain/chainSync";
+import { K_EFF_UNLINKABLE_MIN, MAX_LADDER_TERMS } from "../protocol/parameters";
 import { isAddress, sameAddress } from "../rules/address";
 import { needsAcknowledgement } from "../rules/grade";
 import { isLadderTerm, termsTotal, type LadderTerm } from "../rules/ladder";
@@ -17,6 +19,7 @@ import { validateRpcUrl } from "../rules/rpcUrl";
 import { relayerFee } from "../rules/withdrawal";
 import { DecoyError } from "./errors";
 import type {
+  AccountListener,
   Backend,
   Decoy,
   DepositRequest,
@@ -25,6 +28,7 @@ import type {
   SettingsPatch,
   SharedViewKey,
   ShareViewKeyRequest,
+  Unsubscribe,
   WithdrawalAmount,
   WithdrawalQuote,
   WithdrawRequest,
@@ -32,6 +36,11 @@ import type {
 
 export interface DecoyOptions {
   backend: Backend;
+  /**
+   * The live chain height. Without it the account reports the offline sync state, because nothing has read a chain: the
+   * client never invents a block number.
+   */
+  chainSync?: ChainSync;
 }
 
 function findFundingWallet(account: Account, address: Address): FundingWallet {
@@ -48,10 +57,10 @@ function findAsset(backend: Backend, symbol: string): Asset {
 
 function checkLadderTerms(terms: readonly LadderTerm[]): void {
   if (terms.length === 0) throw new DecoyError("noLadderTerms", "A deposit needs at least one ladder term");
-  if (terms.length > MAX_LADDER_TERMS_PER_LEG) {
+  if (terms.length > MAX_LADDER_TERMS) {
     throw new DecoyError(
       "tooManyLadderTerms",
-      `A deposit takes at most ${MAX_LADDER_TERMS_PER_LEG} ladder terms, got ${terms.length}`,
+      `A deposit takes at most ${MAX_LADDER_TERMS} ladder terms, got ${terms.length}`,
     );
   }
   const invalid = terms.find((term) => !isLadderTerm(term));
@@ -160,10 +169,33 @@ async function updateSettings(backend: Backend, patch: SettingsPatch): Promise<A
 }
 
 /** Creates the DECOY client on a backend. The client checks every request against the rules before the backend sees it. */
-export function createDecoy({ backend }: DecoyOptions): Decoy {
+export function createDecoy({ backend, chainSync }: DecoyOptions): Decoy {
+  /**
+   * The shielded state comes from the backend; the sync state comes from the chain, never from the backend. The merged
+   * account keeps its identity until one of its two sources changes, so a subscriber can compare snapshots by reference.
+   */
+  let merged: { base: Account; sync: SyncState; account: Account } | null = null;
+  function account(): Account {
+    if (!chainSync) return backend.account();
+    const base = backend.account();
+    const sync = chainSync.state();
+    if (!merged || merged.base !== base || merged.sync !== sync) merged = { base, sync, account: { ...base, sync } };
+    return merged.account;
+  }
+
+  function subscribe(listener: AccountListener): Unsubscribe {
+    const stopBackend = backend.subscribe(() => listener(account()));
+    if (!chainSync) return stopBackend;
+    const stopChain = chainSync.subscribe(() => listener(account()));
+    return () => {
+      stopBackend();
+      stopChain();
+    };
+  }
+
   return {
-    account: () => backend.account(),
-    subscribe: (listener) => backend.subscribe(listener),
+    account,
+    subscribe,
     assets: () => backend.assets(),
     quoteWithdrawal: (request) => quoteWithdrawal(backend, request),
     setMeter: () => setMeter(backend),

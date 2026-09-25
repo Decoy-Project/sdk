@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
-import type { Account, Address, Asset } from "../domain/types";
+import type { ChainSync, SyncListener } from "../chain/chainSync";
+import type { Account, Address, Asset, SyncState } from "../domain/types";
 import { memoryBackend } from "../memory/memoryBackend";
-import { DENOMINATION_LADDER, K_EFF_UNLINKABLE_MIN, MAX_LADDER_TERMS_PER_LEG } from "../protocol/parameters";
+import { LADDER_STEPS, K_EFF_UNLINKABLE_MIN, MAX_LADDER_TERMS } from "../protocol/parameters";
 import { nextEpoch } from "../rules/epoch";
 import { createDecoy } from "./createDecoy";
 import { DecoyError, type DecoyErrorCode } from "./errors";
@@ -17,8 +18,8 @@ const RELAYER_FEE_BPS = 10;
 const EPOCH = 3;
 const FIXTURE_TIME = new Date("2026-09-01T00:00:00Z");
 
-const [SMALL_STEP, SECOND_STEP] = DENOMINATION_LADDER;
-const NOT_A_STEP = Math.max(...DENOMINATION_LADDER) + 1;
+const [SMALL_STEP, SECOND_STEP] = LADDER_STEPS;
+const NOT_A_STEP = Math.max(...LADDER_STEPS) + 1;
 
 function fixtureAddress(byte: string): Address {
   return `0x${byte.repeat(20)}`;
@@ -79,7 +80,7 @@ function fixtureAccount(): Account {
       },
     ],
     activity: [],
-    sync: { status: "synced", block: 1n },
+    sync: { status: "offline", block: 0n, endpoint: null },
     escapeHatch: "normal",
     settings: { rpcUrl: "http://127.0.0.1:8547", autoLockMinutes: 10, autoChurn: true },
   };
@@ -121,7 +122,7 @@ describe("deposit", () => {
 
   test("refuses an unknown wallet, an unknown asset and invalid ladder terms", async () => {
     const decoy = client();
-    const tooMany = Array.from({ length: MAX_LADDER_TERMS_PER_LEG + 1 }, () => SMALL_STEP);
+    const tooMany = Array.from({ length: MAX_LADDER_TERMS + 1 }, () => SMALL_STEP);
     const valid = { from: CLEAN_WALLET, asset: "USDG", terms: [SMALL_STEP] };
     await assert.rejects(decoy.deposit({ ...valid, from: DESTINATION }), isDecoyError("unknownFundingWallet"));
     await assert.rejects(decoy.deposit({ ...valid, asset: "XYZ" }), isDecoyError("unknownAsset"));
@@ -199,7 +200,9 @@ describe("view keys", () => {
     assert.equal(shared.grant.holder, "Portfolio dashboard");
     assert.equal(shared.grant.status, "active");
     assert.equal(shared.grant.epoch, EPOCH);
-    assert.ok(shared.key.length > 0);
+    /* The memory backend records the grant and hands over no key: a view key comes from the key ladder, and this
+       backend has none. It invents nothing in its place. */
+    assert.equal(shared.key, "");
     assert.equal(decoy.account().viewKeys[0], shared.grant);
   });
 
@@ -248,5 +251,71 @@ describe("subscribe", () => {
     const before = decoy.account();
     await assert.rejects(decoy.withdraw({ asset: "USDG", amount: 0n, to: DESTINATION }), isDecoyError("invalidAmount"));
     assert.equal(decoy.account(), before);
+  });
+});
+
+describe("chain sync", () => {
+  /** A chain sync the test drives by hand, so no test reads a chain. */
+  function stubChainSync(state: SyncState) {
+    const listeners = new Set<SyncListener>();
+    let current = state;
+    return {
+      sync: {
+        state: () => current,
+        subscribe: (listener: SyncListener) => {
+          listeners.add(listener);
+          return () => listeners.delete(listener);
+        },
+        refresh: () => Promise.resolve(),
+        start: () => undefined,
+        stop: () => undefined,
+      } satisfies ChainSync,
+      advance: (next: SyncState) => {
+        current = next;
+        for (const listener of listeners) listener(current);
+      },
+    };
+  }
+
+  const SYNCED: SyncState = { status: "synced", block: 67_827_647n, endpoint: "public" };
+
+  test("reports the offline sync state when no chain is attached", () => {
+    assert.deepEqual(client().account().sync, { status: "offline", block: 0n, endpoint: null });
+  });
+
+  test("takes the sync state from the chain, not from the backend", () => {
+    const { sync } = stubChainSync(SYNCED);
+    const decoy = createDecoy({ backend: memoryBackend({ account: fixtureAccount(), assets: [USDG, WETH], relayerFeeBps: RELAYER_FEE_BPS, kEff: K_EFF_UNLINKABLE_MIN }), chainSync: sync });
+    assert.deepEqual(decoy.account().sync, SYNCED);
+  });
+
+  test("keeps the account's identity until a source changes", async () => {
+    const { sync, advance } = stubChainSync(SYNCED);
+    const decoy = createDecoy({ backend: memoryBackend({ account: fixtureAccount(), assets: [USDG, WETH], relayerFeeBps: RELAYER_FEE_BPS, kEff: K_EFF_UNLINKABLE_MIN }), chainSync: sync });
+
+    const first = decoy.account();
+    assert.equal(decoy.account(), first, "reading twice returns the same snapshot");
+
+    advance({ status: "synced", block: SYNCED.block + 1n, endpoint: "public" });
+    const afterChain = decoy.account();
+    assert.notEqual(afterChain, first);
+
+    await decoy.updateSettings({ autoChurn: false });
+    assert.notEqual(decoy.account(), afterChain);
+  });
+
+  test("reports a chain change to account listeners", () => {
+    const { sync, advance } = stubChainSync(SYNCED);
+    const decoy = createDecoy({ backend: memoryBackend({ account: fixtureAccount(), assets: [USDG, WETH], relayerFeeBps: RELAYER_FEE_BPS, kEff: K_EFF_UNLINKABLE_MIN }), chainSync: sync });
+    const seen: Account[] = [];
+    const unsubscribe = decoy.subscribe((account) => seen.push(account));
+
+    const next: SyncState = { status: "offline", block: SYNCED.block, endpoint: null };
+    advance(next);
+    unsubscribe();
+    advance(SYNCED);
+
+    assert.equal(seen.length, 1);
+    assert.deepEqual(seen[0].sync, next);
   });
 });
