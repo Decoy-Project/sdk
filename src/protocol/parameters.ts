@@ -2,8 +2,9 @@
  * Protocol parameters. ESTIMATE design values from DECOY's design research, 12 Sep 2026. The research notes are not part
  * of this repository.
  *
- * This file is the only definition site of these values in the TypeScript packages. A generated constants source shared
- * by circuit, contract and client does not exist yet. When it does, this file re-exports from it.
+ * This file is the only definition site of these values in the TypeScript packages. The values that the circuits and the
+ * contracts also check come from `apps/protocol/constants/protocol.json` through `@decoy/protocol`, and are re-exported
+ * here.
  */
 
 /** The ladder is a protocol constant: the pool checks it, so it is defined in constants/protocol.json. */
